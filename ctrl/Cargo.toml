@@ -1,0 +1,54 @@
+[package]
+name = "ctrl"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["ssr"]
+ssr = [
+    "dep:actix-web",
+    "dep:include_dir",
+    "dep:leptos",
+    "dep:leptos_actix",
+    "dep:leptos_config",
+    "dep:leptos_meta",
+    "dep:leptos_router",
+    "dep:mime_guess",
+    "dep:shared",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "leptos/ssr",
+]
+csr = [
+    "dep:leptos",
+    "leptos/csr",
+    "dep:web-sys",
+    "dep:gloo-net",
+    "dep:gloo-timers",
+]
+hydrate = [
+    "dep:leptos",
+    "leptos/hydrate",
+    "dep:web-sys",
+    "dep:gloo-net",
+    "dep:gloo-timers",
+]
+
+[dependencies]
+actix-web = { workspace = true, optional = true }
+gloo-net = { version = "0.4", optional = true, features = ["http"] }
+gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
+include_dir = { workspace = true, optional = true }
+leptos = { workspace = true, optional = true, features = ["ssr"] }
+leptos_actix = { workspace = true, optional = true }
+leptos_config = { workspace = true, optional = true }
+leptos_meta = { workspace = true, optional = true }
+leptos_router = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+shared = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Navigator", "Window"] }

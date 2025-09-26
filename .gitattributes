@@ -1,0 +1,2 @@
+Cargo.nix binary
+dl/** filter=lfs diff=lfs merge=lfs -text

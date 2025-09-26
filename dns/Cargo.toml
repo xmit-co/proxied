@@ -1,0 +1,15 @@
+[package]
+name = "dns"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hickory-proto = "0.24"
+postcard.workspace = true
+redis.workspace = true
+serde.workspace = true
+shared.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

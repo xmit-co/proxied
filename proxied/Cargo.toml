@@ -1,0 +1,12 @@
+[package]
+name = "proxied"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes.workspace = true
+chrono.workspace = true
+minreq.workspace = true
+postcard.workspace = true
+shared.workspace = true
+tokio.workspace = true
