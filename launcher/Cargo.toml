@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 minreq.workspace = true
+
+[package.metadata.bundle]
+identifier = "eu.proxied.launcher"

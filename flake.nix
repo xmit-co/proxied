@@ -89,6 +89,7 @@
         devShell = pkgs.mkShell {
           packages = with pkgs; [
             cargo
+            cargo-bundle
             cargo-feature
             cargo-leptos
             cargo-sort

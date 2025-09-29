@@ -66,8 +66,6 @@ pub fn App() -> impl IntoView {
             font-family: system-ui, sans-serif;
             }
             body {
-            margin: 0;
-            min-height: 100vh;
             max-width: 48rem;
             margin: 2em auto;
             }

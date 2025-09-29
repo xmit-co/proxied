@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis::AsyncCommands;
 use serde::Deserialize;
@@ -12,11 +13,16 @@ use uuid::Uuid;
 
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::domain::Name;
-use hickory_proto::rr::rdata::SRV;
+use hickory_proto::rr::rdata::{NS, SOA, SRV};
 use hickory_proto::rr::{RData, Record, RecordType};
 use shared::DynError;
 
 const DEFAULT_TTL: u32 = 30;
+const SOA_REFRESH: i32 = 3600;
+const SOA_RETRY: i32 = 600;
+const SOA_EXPIRE: i32 = 86_400;
+const SOA_MINIMUM: u32 = DEFAULT_TTL;
+const SOA_TTL: u32 = DEFAULT_TTL;
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
@@ -29,6 +35,7 @@ async fn main() -> Result<(), DynError> {
         config.domain_ascii.clone(),
         config.root_ipv4.clone(),
         config.root_ipv6.clone(),
+        config.root_ns.clone(),
         redis,
     ));
 
@@ -62,11 +69,15 @@ struct Config {
     bind_addr: SocketAddr,
     root_ipv4: Vec<Ipv4Addr>,
     root_ipv6: Vec<Ipv6Addr>,
+    root_ns: Vec<Name>,
 }
 
 impl Config {
     fn from_env() -> Result<Self, ConfigError> {
         let domain = env::var("DOMAIN").map_err(|_| ConfigError::missing("DOMAIN"))?;
+        let domain_ascii = normalize_name(&domain, "DOMAIN")?;
+        Name::from_ascii(&domain_ascii).map_err(|err| ConfigError::invalid("DOMAIN", err))?;
+        let zone_without_dot = domain_ascii.trim_end_matches('.');
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
@@ -108,8 +119,30 @@ impl Config {
             ));
         }
 
-        let domain_ascii = normalize_domain(&domain)?;
-        Name::from_ascii(&domain_ascii).map_err(|err| ConfigError::invalid("DOMAIN", err))?;
+        let ns_hosts_raw = env::var("NS_HOSTS").unwrap_or_default();
+        let mut root_ns = Vec::new();
+        for part in ns_hosts_raw.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let normalized = if trimmed.contains('.') {
+                normalize_name(trimmed, "NS_HOSTS")?
+            } else if zone_without_dot.is_empty() {
+                normalize_name(trimmed, "NS_HOSTS")?
+            } else {
+                let label = normalize_name(trimmed, "NS_HOSTS")?;
+                let label = label.trim_end_matches('.');
+                format!("{label}.{zone_without_dot}.")
+            };
+
+            let name = Name::from_ascii(&normalized)
+                .map_err(|err| ConfigError::invalid("NS_HOSTS", err))?;
+            if !root_ns.iter().any(|existing| existing == &name) {
+                root_ns.push(name);
+            }
+        }
 
         Ok(Self {
             domain_ascii,
@@ -117,14 +150,15 @@ impl Config {
             bind_addr,
             root_ipv4,
             root_ipv6,
+            root_ns,
         })
     }
 }
 
-fn normalize_domain(raw: &str) -> Result<String, ConfigError> {
+fn normalize_name(raw: &str, var: &str) -> Result<String, ConfigError> {
     let trimmed = raw.trim().trim_end_matches('.');
     if trimmed.is_empty() {
-        return Err(ConfigError::invalid("DOMAIN", "cannot be empty"));
+        return Err(ConfigError::invalid(var, "cannot be empty"));
     }
 
     let lower = trimmed.to_ascii_lowercase();
@@ -164,6 +198,10 @@ struct DnsState {
     zone_without_dot: String,
     root_ipv4: Vec<Ipv4Addr>,
     root_ipv6: Vec<Ipv6Addr>,
+    root_ns: Vec<Name>,
+    soa_mname: Name,
+    soa_rname: Name,
+    soa_serial: u32,
     redis: redis::Client,
 }
 
@@ -172,14 +210,41 @@ impl DnsState {
         zone_ascii: String,
         root_ipv4: Vec<Ipv4Addr>,
         root_ipv6: Vec<Ipv6Addr>,
+        root_ns: Vec<Name>,
         redis: redis::Client,
     ) -> Self {
         let zone_without_dot = zone_ascii.trim_end_matches('.').to_string();
+        let zone_name = Name::from_ascii(&zone_ascii)
+            .expect("zone_ascii must be a valid DNS name at this point");
+        let primary_ns = root_ns
+            .first()
+            .cloned()
+            .unwrap_or_else(|| zone_name.clone());
+        let contact = if zone_without_dot.is_empty() {
+            Name::from_ascii("hostmaster.")
+                .expect("hostmaster. should be a valid contact for the root zone")
+        } else {
+            Name::from_ascii(&format!("hostmaster.{zone_without_dot}."))
+                .expect("hostmaster contact should be a valid DNS name")
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let soa_serial = if now > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            now as u32
+        };
         Self {
             zone_ascii,
             zone_without_dot,
             root_ipv4,
             root_ipv6,
+            root_ns,
+            soa_mname: primary_ns,
+            soa_rname: contact,
+            soa_serial,
             redis,
         }
     }
@@ -243,6 +308,19 @@ impl DnsState {
         };
 
         Name::from_ascii(&fqdn).map_err(LookupError::Name)
+    }
+
+    fn soa_record(&self, owner: &Name) -> Record {
+        let soa = SOA::new(
+            self.soa_mname.clone(),
+            self.soa_rname.clone(),
+            self.soa_serial,
+            SOA_REFRESH,
+            SOA_RETRY,
+            SOA_EXPIRE,
+            SOA_MINIMUM,
+        );
+        Record::from_rdata(owner.clone(), SOA_TTL, RData::SOA(soa))
     }
 }
 
@@ -569,6 +647,21 @@ fn answer_zone_root(
                 })
             }
         }
+        RecordType::NS => {
+            let answers = build_ns_records(&name, &state.root_ns);
+            if answers.is_empty() {
+                Ok(QuestionResponse::NoData)
+            } else {
+                Ok(QuestionResponse::Answer {
+                    answers,
+                    additionals: Vec::new(),
+                })
+            }
+        }
+        RecordType::SOA => Ok(QuestionResponse::Answer {
+            answers: vec![state.soa_record(&name)],
+            additionals: Vec::new(),
+        }),
         RecordType::AAAA => {
             let answers = build_aaaa_records_from_addrs(&name, &state.root_ipv6);
             if answers.is_empty() {
@@ -581,17 +674,15 @@ fn answer_zone_root(
             }
         }
         RecordType::ANY => {
-            let mut answers = build_a_records_from_addrs(&name, &state.root_ipv4);
+            let mut answers = vec![state.soa_record(&name)];
+            answers.extend(build_ns_records(&name, &state.root_ns));
+            answers.extend(build_a_records_from_addrs(&name, &state.root_ipv4));
             answers.extend(build_aaaa_records_from_addrs(&name, &state.root_ipv6));
 
-            if answers.is_empty() {
-                Ok(QuestionResponse::NoData)
-            } else {
-                Ok(QuestionResponse::Answer {
-                    answers,
-                    additionals: Vec::new(),
-                })
-            }
+            Ok(QuestionResponse::Answer {
+                answers,
+                additionals: Vec::new(),
+            })
         }
         _ => Ok(QuestionResponse::NoData),
     }
@@ -722,6 +813,14 @@ fn build_aaaa_records(name: &Name, domain: &DomainEntry) -> Vec<Record> {
         .ipv6_addresses()
         .into_iter()
         .map(|addr| Record::from_rdata(name.clone(), DEFAULT_TTL, RData::AAAA(addr.into())))
+        .collect()
+}
+
+fn build_ns_records(name: &Name, hosts: &[Name]) -> Vec<Record> {
+    hosts
+        .iter()
+        .cloned()
+        .map(|ns_name| Record::from_rdata(name.clone(), DEFAULT_TTL, RData::NS(NS(ns_name))))
         .collect()
 }
 
